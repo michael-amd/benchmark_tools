@@ -2,14 +2,14 @@
 # ------------------------------------------------------------------------------
 # perf_offline_csv.sh
 #
-# This script runs sglang.bench_one_batch for TP=8 and multiple batch sizes.
+# This script runs sglang.bench_one_batch for multiple TP and batch sizes.
 # It extracts the final metrics (from the section after "Benchmark ...") for:
 #   - Prefill latency (s)
 #   - Decode median latency (s)
 #   - Total latency (s)
 #   - Throughput (token/s)
 #
-# The results are saved into a CSV file with no spaces in the header.
+# The results are saved into a CSV file.
 # ------------------------------------------------------------------------------
  
 # Model and tokenizer paths
@@ -20,7 +20,7 @@ TOKENIZER="Xenova/grok-1-tokenizer"
 ILEN=1024
 OLEN=128
 
-# Use only TP=8 and define batch sizes
+# define TP and batch sizes
 TP_VALUES=(8)
 BATCH_SIZES=(1 2 4 8 16 32 64 128 256)
 
@@ -34,7 +34,7 @@ OUTPUT_CSV="${current_date}_${header_name}.csv"
 echo "${header_name}" > "$OUTPUT_CSV"
 echo "TP,batch_size,IL,OL,Prefill_latency(s),median_decode_latency(s),E2E_Latency(s),E2E_Throughput(token/s)" >> "$OUTPUT_CSV"
 
-# Loop over each batch size (TP is fixed to 8)
+# Loop over each batch size
 for tp in "${TP_VALUES[@]}"; do
   for bs in "${BATCH_SIZES[@]}"; do
     echo "Running TP=${tp}, batch_size=${bs} ..."
