@@ -1,42 +1,73 @@
-# 1. build docker rocm docker.rocm
+#!/usr/bin/env bash
+# ------------------------------------------------------------------------------
+# perf_offline_csv.sh
+#
+# This script runs sglang.bench_one_batch for TP=8 and multiple batch sizes.
+# It extracts the final metrics (from the section after "Benchmark ...") for:
+#   - Prefill latency (s)
+#   - Decode median latency (s)
+#   - Total latency (s)
+#   - Throughput (token/s)
+#
+# The results are saved into a CSV file with no spaces in the header.
+# ------------------------------------------------------------------------------
+ 
+# Model and tokenizer paths
+MODEL="/mnt/raid/models/amd--grok-1-W4A8KV8/"
+TOKENIZER="Xenova/grok-1-tokenizer"
 
-# git clone https://github.com/sgl-project/sglang.git
-# cd docker 
-# docker build --build-arg SGL_BRANCH=v0.4.3.post4 -t v0.4.3.post4-rocm630-$date -f Dockerfile.rocm .
+# Input/Output lengths
+ILEN=1024
+OLEN=128
 
-# or pull lasted docker  
-# docker pull rocm/sgl-dev:20250310rc
+# Use only TP=8 and define batch sizes
+TP_VALUES=(8)
+BATCH_SIZES=(1 2 4 8 16 32 64 128 256)
 
-# 2. enter docker 
-docker start sgl-dev_20250310rc
-docker attach sgl-dev_20250310rc
+# Get the current date (e.g. 20250313)
+current_date=$(date +%Y%m%d)
+# Set header name with no spaces
+header_name="GROK1_CK-MOE-I4F8-AITER-DECODE-ATTN_pref_offline"
+OUTPUT_CSV="${current_date}_${header_name}.csv"
 
-cd /mnt/raid/michael/HaiShaw/sglang/
+# Write header lines to CSV (first line is title, second line is column headers)
+echo "${header_name}" > "$OUTPUT_CSV"
+echo "TP,batch_size,IL,OL,Prefill_latency(s),median_decode_latency(s),E2E_Latency(s),E2E_Throughput(token/s)" >> "$OUTPUT_CSV"
 
-# run offline 
-# CK_MOE=1 USE_INT4_WEIGHT=1 python -m sglang.bench_one_batch --batch-size 32 --input 1024 --output 128 --model /mnt/raid/models/amd--grok-1-W4A8KV8/ --tokenizer-path Xenova/grok-1-tokenizer --tp 8 --quantization fp8 --trust-remote-code
+# Loop over each batch size (TP is fixed to 8)
+for tp in "${TP_VALUES[@]}"; do
+  for bs in "${BATCH_SIZES[@]}"; do
+    echo "Running TP=${tp}, batch_size=${bs} ..."
 
-CK_MOE=1 USE_INT4_WEIGHT=1 MOE_PADDING=0 python3 -m sglang.bench_one_batch --model /mnt/raid/models/amd--grok-1-W4A8KV8/ --tokenizer-path Xenova/grok-1-tokenizer --tp 8 --batch-size 1 --input 1024 --output 128 --attention-backend aiter --sampling-backend  pytorch --quantization fp8 --trust-remote-code --cuda-graph-max-bs 1024
+    # Run the benchmark command and capture output
+    out=$(
+      CK_MOE=1 USE_INT4_WEIGHT=1 MOE_PADDING=0 \
+      python3 -m sglang.bench_one_batch \
+        --model "${MODEL}" \
+        --tokenizer-path "${TOKENIZER}" \
+        --tp "${tp}" \
+        --batch-size "${bs}" \
+        --input "${ILEN}" \
+        --output "${OLEN}" \
+        --attention-backend aiter \
+        --sampling-backend pytorch \
+        --quantization fp8 \
+        --trust-remote-code \
+        --cuda-graph-max-bs 1024 2>&1
+    )
 
-# template
-# CK_MOE=1 USE_INT4_WEIGHT=1 MOE_PADDING=0 python3 -m sglang.bench_one_batch --model ${model} --tokenizer-path Xenova/grok-1-tokenizer --tp ${tp} --batch-size $bs --input $ilen --output $olen --attention-backend aiter --sampling-backend  pytorch --quantization fp8 --trust-remote-code --cuda-graph-max-bs 1024
+    # Capture the section after the "Benchmark ..." line
+    last_section=$(echo "$out" | awk '/Benchmark/ {flag=1; next} flag')
 
-# result: median throughput: 1776.12 token/s
+    # Extract the four metrics:
+    prefill_latency=$(echo "$last_section" | grep -oP 'Prefill\. latency:\s*\K[\d.]+' | tail -n 1)
+    decode_median_latency=$(echo "$last_section" | grep -oP 'Decode\.\s+median latency:\s*\K[\d.]+' | tail -n 1)
+    total_latency=$(echo "$last_section" | grep -oP 'Total\. latency:\s*\K[\d.]+' | tail -n 1)
+    throughput=$(echo "$last_section" | grep -oP 'throughput:\s*\K[\d.]+' | tail -n 1)
 
-# Prefill. latency: 4.75348 s, throughput:    215.42 token/s
-# Decode.  latency: 1.39892 s, throughput:      0.71 token/s
-# Decode.  latency: 0.01613 s, throughput:     61.98 token/s
-# Decode.  latency: 0.01586 s, throughput:     63.06 token/s
-# Decode.  latency: 0.01585 s, throughput:     63.10 token/s
-# Decode.  latency: 0.01583 s, throughput:     63.19 token/s
-# Decode.  median latency: 0.01585 s, median throughput:     63.10 token/s
-# Total. latency:  6.248 s, throughput:    165.18 token/s
-# Benchmark ...
-# Prefill. latency: 0.32363 s, throughput:   3164.09 token/s
-# Decode.  latency: 0.01589 s, throughput:     62.93 token/s
-# Decode.  latency: 0.01590 s, throughput:     62.88 token/s
-# Decode.  latency: 0.01581 s, throughput:     63.26 token/s
-# Decode.  latency: 0.01584 s, throughput:     63.14 token/s
-# Decode.  latency: 0.01580 s, throughput:     63.29 token/s
-# Decode.  median latency: 0.01577 s, median throughput:     63.41 token/s
-# Total. latency:  2.327 s, throughput:    495.07 token/s
+    # Append the metrics to the CSV row (fields remain empty if not found)
+    echo "${tp},${bs},${ILEN},${OLEN},${prefill_latency},${decode_median_latency},${total_latency},${throughput}" >> "$OUTPUT_CSV"
+  done
+done
+
+echo "All done! Results saved to ${OUTPUT_CSV}"
