@@ -11,14 +11,15 @@
 #      into the created folder), and then shuts down the server.
 #      • For mode "aiter": uses --attention-backend aiter.
 #      • For mode "decode": uses --attention-backend aiter_decode.
-#   3. The embedded client code runs each request rate three times,
+#   3. The embedded client code runs each request rate (1,2,4,8,16) three times,
 #      logging output to files named as:
 #         sglang_client_log_grok1_${MODE}_${RATE}_run${i}_${TIMESTAMP}.log
 #      These files are created directly in the run folder.
 #   4. After both modes have run, the script parses the best (lowest Median E2E Latency)
-#      metrics from the generated log files for each request rate and builds a CSV summary.
+#      metrics from the generated log files for each request rate, computes ratio rows,
+#      and builds a CSV summary.
 #
-# The final CSV summary is stored in the run folder.
+# The final CSV summary (including ratio rows) is stored in the run folder.
 # ------------------------------------------------------------------------------
  
 # ---------------------------
@@ -72,9 +73,7 @@ shutdown_server() {
 # ---------------------------
 # 3. Embedded Client Benchmark Code
 # ---------------------------
-# This function embeds the client benchmark logic.
-# It runs each request rate (1,2,4,8,16) three times and logs output to files
-# directly inside the run folder.
+# Runs each request rate (1,2,4,8,16) three times and writes log files directly into $folder.
 run_client_benchmark() {
     local mode=$1
     export MODE=$mode
@@ -89,18 +88,7 @@ run_client_benchmark() {
             if [ "$NUM_PROMPTS" -gt 2400 ]; then
                 NUM_PROMPTS=2400
             fi
-            CMD="python3 -m sglang.bench_serving \
-                --backend sglang \
-                --tokenizer Xenova/grok-1-tokenizer \
-                --dataset-name random \
-                --random-input 1024 \
-                --random-output 1024 \
-                --num-prompts $NUM_PROMPTS \
-                --request-rate $RATE \
-                --output-file online.jsonl"
-            if [ "$mode" == "decode" ]; then
-                CMD="$CMD --decode-only"
-            fi
+            CMD="python3 -m sglang.bench_serving --backend sglang --tokenizer Xenova/grok-1-tokenizer --dataset-name random --random-input 1024 --random-output 1024 --num-prompts $NUM_PROMPTS --request-rate $RATE --output-file online.jsonl"
             echo "Executing: $CMD" | tee -a "$LOGFILE"
             eval "$CMD" 2>&1 | tee -a "$LOGFILE"
         done
@@ -110,7 +98,7 @@ run_client_benchmark() {
 # ---------------------------
 # 4. Function to Select Best Metrics from Logs
 # ---------------------------
-# Scans log files matching sglang_client_log_grok1_${MODE}_${RATE}_run*.log,
+# Scans log files matching $folder/sglang_client_log_grok1_${MODE}_${RATE}_run*.log,
 # selects the one with the lowest "Median E2E Latency (ms)", and extracts its
 # Median TTFT and ITL values.
 get_best_metrics() {
@@ -155,96 +143,161 @@ launch_server "aiter"
 run_client_benchmark "aiter"
 shutdown_server
 
-# For mode "decode" (decode-only)
+# For mode "decode" (server launched with aiter_decode)
 launch_server "aiter_decode"
 run_client_benchmark "decode"
 shutdown_server
 
 # ---------------------------
-# 6. Parse Logs and Generate CSV Summary
+# 6. Parse Logs and Generate CSV Summary (with Ratio Rows)
 # ---------------------------
 REQ_RATES=(1 2 4 8 16)
+# Hard-coded H100 reference arrays:
+H100_E2E=(13209 13874 16613 44918 85049)
+H100_TTFT=(99.1 102.0 113.4 170.7 520.9)
+H100_ITL=(23.0 24.4 25.9 63.9 108.6)
+
+# Capture best metrics for each mode into associative arrays.
+declare -A best_e2e_aiter best_ttft_aiter best_itl_aiter
+declare -A best_e2e_decode best_ttft_decode best_itl_decode
+
+for rate in "${REQ_RATES[@]}"; do
+    read e2e_a ttft_a itl_a < <(get_best_metrics "aiter" "$rate")
+    best_e2e_aiter[$rate]="$e2e_a"
+    best_ttft_aiter[$rate]="$ttft_a"
+    best_itl_aiter[$rate]="$itl_a"
+    
+    read e2e_d ttft_d itl_d < <(get_best_metrics "decode" "$rate")
+    best_e2e_decode[$rate]="$e2e_d"
+    best_ttft_decode[$rate]="$ttft_d"
+    best_itl_decode[$rate]="$itl_d"
+done
+
+# Function to compute ratio as integer percentage.
+compute_ratio() {
+    local ref=$1
+    local meas=$2
+    if [[ "$meas" == "NA" || "$meas" == "0" ]]; then
+        echo "NA"
+    else
+        awk -v r="$ref" -v m="$meas" 'BEGIN { printf "%d", (r/m)*100 }'
+    fi
+}
+
 {
   echo "Online mode - GROK1 (rocm/sgl-dev:20250309rc, /rocm/sgl-dev:20250310rc)"
   echo ""
-  echo "Median E2E Latency (ms, lower is better)"
+  echo "Median E2E Latency (ms, lower better)"
   printf "request rate"
   for rate in "${REQ_RATES[@]}"; do
       printf "\t%s" "$rate"
   done
   echo ""
   printf "H100"
-  H100_E2E=(13209 13874 16613 44918 85049)
   for val in "${H100_E2E[@]}"; do
       printf "\t%s" "$val"
   done
   echo ""
-  printf "MI300x-aiter (prefill+decode)"
+  printf "MI300x-aiter (prefill+decode), dell300x-pla-t10-17"
   for rate in "${REQ_RATES[@]}"; do
-      read e2e_a ttft_a itl_a < <(get_best_metrics "aiter" "$rate")
-      printf "\t%s" "$e2e_a"
+      printf "\t%s" "${best_e2e_aiter[$rate]}"
   done
   echo ""
-  printf "MI300x-aiter_decode (decode only)"
+  printf "MI300x-aiter_decode (decode only), dell300x-pla-t10-17"
   for rate in "${REQ_RATES[@]}"; do
-      read e2e_d ttft_d itl_d < <(get_best_metrics "decode" "$rate")
-      printf "\t%s" "$e2e_d"
+      printf "\t%s" "${best_e2e_decode[$rate]}"
   done
   echo ""
-  
+  # Ratio rows for E2E
+  printf "H100/MI300x-aiter"
+  for idx in "${!REQ_RATES[@]}"; do
+      rate=${REQ_RATES[$idx]}
+      ratio=$(compute_ratio "${H100_E2E[$idx]}" "${best_e2e_aiter[$rate]}")
+      printf "\t%s%%" "$ratio"
+  done
   echo ""
-  echo "Median TTFT (ms, lower is better)"
+  printf "H100/MI300x-aiter_decode"
+  for idx in "${!REQ_RATES[@]}"; do
+      rate=${REQ_RATES[$idx]}
+      ratio=$(compute_ratio "${H100_E2E[$idx]}" "${best_e2e_decode[$rate]}")
+      printf "\t%s%%" "$ratio"
+  done
+  echo ""
+  echo ""
+  echo "Median TTFT (ms, lower better)"
   printf "request rate"
   for rate in "${REQ_RATES[@]}"; do
       printf "\t%s" "$rate"
   done
   echo ""
   printf "H100"
-  H100_TTFT=(99.1 102.0 113.4 170.7 520.9)
   for val in "${H100_TTFT[@]}"; do
       printf "\t%s" "$val"
   done
   echo ""
-  printf "MI300x-aiter (prefill+decode)"
+  printf "MI300x-aiter (prefill+decode), dell300x-pla-t10-17"
   for rate in "${REQ_RATES[@]}"; do
-      read e2e_a ttft_a itl_a < <(get_best_metrics "aiter" "$rate")
-      printf "\t%s" "$ttft_a"
+      printf "\t%s" "${best_ttft_aiter[$rate]}"
   done
   echo ""
-  printf "MI300x-aiter_decode (decode only)"
+  printf "MI300x-aiter_decode (decode only), dell300x-pla-t10-17"
   for rate in "${REQ_RATES[@]}"; do
-      read e2e_d ttft_d itl_d < <(get_best_metrics "decode" "$rate")
-      printf "\t%s" "$ttft_d"
+      printf "\t%s" "${best_ttft_decode[$rate]}"
   done
   echo ""
-  
+  # Ratio rows for TTFT
+  printf "H100/MI300x-aiter"
+  for idx in "${!REQ_RATES[@]}"; do
+      rate=${REQ_RATES[$idx]}
+      ratio=$(compute_ratio "${H100_TTFT[$idx]}" "${best_ttft_aiter[$rate]}")
+      printf "\t%s%%" "$ratio"
+  done
   echo ""
-  echo "Median ITL (ms, lower is better)"
+  printf "H100/MI300x-aiter_decode"
+  for idx in "${!REQ_RATES[@]}"; do
+      rate=${REQ_RATES[$idx]}
+      ratio=$(compute_ratio "${H100_TTFT[$idx]}" "${best_ttft_decode[$rate]}")
+      printf "\t%s%%" "$ratio"
+  done
+  echo ""
+  echo ""
+  echo "Median ITL (ms, lower better)"
   printf "request rate"
   for rate in "${REQ_RATES[@]}"; do
       printf "\t%s" "$rate"
   done
   echo ""
   printf "H100"
-  H100_ITL=(23.0 24.4 25.9 63.9 108.6)
   for val in "${H100_ITL[@]}"; do
       printf "\t%s" "$val"
   done
   echo ""
-  printf "MI300x-aiter (prefill+decode)"
+  printf "MI300x-aiter (prefill+decode), dell300x-pla-t10-17"
   for rate in "${REQ_RATES[@]}"; do
-      read e2e_a ttft_a itl_a < <(get_best_metrics "aiter" "$rate")
-      printf "\t%s" "$itl_a"
+      printf "\t%s" "${best_itl_aiter[$rate]}"
   done
   echo ""
-  printf "MI300x-aiter_decode (decode only)"
+  printf "MI300x-aiter_decode (decode only), dell300x-pla-t10-17"
   for rate in "${REQ_RATES[@]}"; do
-      read e2e_d ttft_d itl_d < <(get_best_metrics "decode" "$rate")
-      printf "\t%s" "$itl_d"
+      printf "\t%s" "${best_itl_decode[$rate]}"
+  done
+  echo ""
+  # Ratio rows for ITL
+  printf "H100/MI300x-aiter"
+  for idx in "${!REQ_RATES[@]}"; do
+      rate=${REQ_RATES[$idx]}
+      ratio=$(compute_ratio "${H100_ITL[$idx]}" "${best_itl_aiter[$rate]}")
+      printf "\t%s%%" "$ratio"
+  done
+  echo ""
+  printf "H100/MI300x-aiter_decode"
+  for idx in "${!REQ_RATES[@]}"; do
+      rate=${REQ_RATES[$idx]}
+      ratio=$(compute_ratio "${H100_ITL[$idx]}" "${best_itl_decode[$rate]}")
+      printf "\t%s%%" "$ratio"
   done
   echo ""
 } > "$OUTPUT_CSV"
 
 echo "CSV summary saved to ${OUTPUT_CSV}"
-
 echo "All done! Client logs and CSV summary are saved in ${folder}."
