@@ -6,6 +6,7 @@
 #
 # It:
 #   1. Creates a folder named {date}_GROK1_CK-MOE-I4F8-AITER-DECODE-ATTN_online.
+#      It writes a config.json file in that folder with the docker image name from the variable DOCKER_NAME.
 #   2. For each mode, launches the server with the appropriate attention backend,
 #      runs embedded client benchmark code for various request rates (logging directly
 #      into the created folder), and then shuts down the server.
@@ -16,11 +17,13 @@
 #         sglang_client_log_grok1_${MODE}_${RATE}_run${i}_${TIMESTAMP}.log
 #      These files are created directly in the run folder.
 #   4. After both modes have run, the script parses the best (lowest Median E2E Latency)
-#      metrics from the generated log files for each request rate, computes ratio rows,
-#      and builds a CSV summary.
+#      metrics from the generated log files for each request rate and builds a CSV summary.
 #
-# The final CSV summary (including ratio rows) is stored in the run folder.
+# The final CSV summary is stored in the run folder with a header line that uses the DOCKER_NAME.
 # ------------------------------------------------------------------------------
+ 
+# Set DOCKER_NAME variable
+DOCKER_NAME="rocm/sgl-dev:20250318rc"
  
 # ---------------------------
 # 1. Create Folder for This Run
@@ -29,6 +32,10 @@ current_date=$(date +%Y%m%d)
 folder="${current_date}_GROK1_CK-MOE-I4F8-AITER-DECODE-ATTN_online"
 mkdir -p "$folder"
 OUTPUT_CSV="${folder}/${current_date}_GROK1_CK-MOE-I4F8-AITER-DECODE-ATTN_online.csv"
+
+# Write config.json with docker image name from DOCKER_NAME
+echo "{\"docker\": \"${DOCKER_NAME}\"}" > "${folder}/config.json"
+echo "Wrote config.json to ${folder}/config.json"
 
 # ---------------------------
 # 2. Functions to Launch and Shutdown Server per Mode
@@ -73,7 +80,6 @@ shutdown_server() {
 # ---------------------------
 # 3. Embedded Client Benchmark Code
 # ---------------------------
-# Runs each request rate (1,2,4,8,16) three times and writes log files directly into $folder.
 run_client_benchmark() {
     local mode=$1
     export MODE=$mode
@@ -98,9 +104,6 @@ run_client_benchmark() {
 # ---------------------------
 # 4. Function to Select Best Metrics from Logs
 # ---------------------------
-# Scans log files matching $folder/sglang_client_log_grok1_${MODE}_${RATE}_run*.log,
-# selects the one with the lowest "Median E2E Latency (ms)", and extracts its
-# Median TTFT and ITL values.
 get_best_metrics() {
     local mode=$1
     local rate=$2
@@ -152,12 +155,11 @@ shutdown_server
 # 6. Parse Logs and Generate CSV Summary (with Ratio Rows)
 # ---------------------------
 REQ_RATES=(1 2 4 8 16)
-# Hard-coded H100 reference arrays:
+# Hard-coded H100 reference arrays for online mode:
 H100_E2E=(13209 13874 16613 44918 85049)
 H100_TTFT=(99.1 102.0 113.4 170.7 520.9)
 H100_ITL=(23.0 24.4 25.9 63.9 108.6)
 
-# Capture best metrics for each mode into associative arrays.
 declare -A best_e2e_aiter best_ttft_aiter best_itl_aiter
 declare -A best_e2e_decode best_ttft_decode best_itl_decode
 
@@ -173,7 +175,6 @@ for rate in "${REQ_RATES[@]}"; do
     best_itl_decode[$rate]="$itl_d"
 done
 
-# Function to compute ratio as integer percentage.
 compute_ratio() {
     local ref=$1
     local meas=$2
@@ -185,7 +186,7 @@ compute_ratio() {
 }
 
 {
-  echo "Online mode - GROK1 (rocm/sgl-dev:20250309rc, /rocm/sgl-dev:20250310rc)"
+  echo "Online mode - GROK1 (${DOCKER_NAME})"
   echo ""
   echo "Median E2E Latency (ms, lower better)"
   printf "request rate"
